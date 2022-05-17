@@ -341,8 +341,15 @@ func (t *Loki) initIngester() (_ services.Service, err error) {
 	httpMiddleware := middleware.Merge(
 		serverutil.RecoveryHTTPMiddleware,
 	)
-	t.Server.HTTP.Path("/flush").Methods("GET", "POST").Handler(httpMiddleware.Wrap(http.HandlerFunc(t.Ingester.FlushHandler)))
-	t.Server.HTTP.Methods("POST").Path("/ingester/flush_shutdown").Handler(httpMiddleware.Wrap(http.HandlerFunc(t.Ingester.ShutdownHandler)))
+	t.Server.HTTP.Methods("GET", "POST").Path("/flush").Handler(
+		httpMiddleware.Wrap(http.HandlerFunc(t.Ingester.FlushHandler)),
+	)
+	t.Server.HTTP.Methods("POST").Path("/ingester/flush_shutdown").Handler(
+		httpMiddleware.Wrap(http.HandlerFunc(t.Ingester.ShutdownHandler)),
+	)
+	t.Server.HTTP.Methods("POST").Path("/ingester/shutdown_and_forget").Handler(
+		httpMiddleware.Wrap(http.HandlerFunc(t.Ingester.ShutdownAndForgetHandler)),
+	)
 
 	return t.Ingester, nil
 }

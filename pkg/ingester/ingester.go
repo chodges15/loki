@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log/level"
+	"github.com/grafana/dskit/modules"
 	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/services"
 	"github.com/grafana/dskit/tenant"
@@ -173,6 +174,7 @@ type Interface interface {
 	CheckReady(ctx context.Context) error
 	FlushHandler(w http.ResponseWriter, _ *http.Request)
 	ShutdownHandler(w http.ResponseWriter, r *http.Request)
+	ShutdownAndForgetHandler(w http.ResponseWriter, r *http.Request)
 	GetOrCreateInstance(instanceID string) *instance
 }
 
@@ -506,6 +508,12 @@ func (i *Ingester) stopping(_ error) error {
 	}
 	i.flushQueuesDone.Wait()
 
+	// In case the flag to clear tokens on shutdown is set we need to mark the
+	// ingester service as "failed", so Loki will shut down entirely.
+	// The module manager logs the failure `modules.ErrStopProcess` in a special way.
+	if i.lifecycler.ClearTokensOnShutdown() && errs.Err() == nil {
+		return modules.ErrStopProcess
+	}
 	return errs.Err()
 }
 
@@ -536,6 +544,26 @@ func (i *Ingester) ShutdownHandler(w http.ResponseWriter, r *http.Request) {
 	_ = services.StopAndAwaitTerminated(context.Background(), i)
 	i.lifecycler.SetFlushOnShutdown(originalState)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ShutdownAndForgetHandler triggers the following operations:
+//     * Change the state of ring to stop accepting writes.
+//     * Flush all the chunks.
+//     * Unregister from KV store
+//     * Terminate process
+func (i *Ingester) ShutdownAndForgetHandler(w http.ResponseWriter, r *http.Request) {
+	i.lifecycler.SetFlushOnShutdown(true)
+	i.lifecycler.SetUnregisterOnShutdown(true)
+	i.lifecycler.SetClearTokensOnShutdown(true)
+	err := services.StopAndAwaitTerminated(context.Background(), i)
+	// Stopping the module will return the modules.ErrStopProcess error. This is
+	// needed so the Loki process is shut down completely.
+	if err == nil || err == modules.ErrStopProcess {
+		w.WriteHeader(http.StatusNoContent)
+	} else {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+	}
 }
 
 // Push implements logproto.Pusher.
