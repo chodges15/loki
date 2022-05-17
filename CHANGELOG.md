@@ -1,6 +1,7 @@
 ## Main
 
 * [6099](https://github.com/grafana/loki/pull/6099/files) **cstyan**: Drop lines with malformed JSON in Promtail JSON pipeline stage
+* [6179](https://github.com/grafana/loki/pull/6179) **chaudum**: Add new HTTP endpoint `/ingester/shutdown_and_forget` to delete ingester ring token file and shutdown process gracefully
 * [6136](https://github.com/grafana/loki/pull/6136) **periklis**: Add support for alertmanager header authorization
 * [6102](https://github.com/grafana/loki/pull/6102) **timchenko-a**: Add multi-tenancy support to lambda-promtail
 * [5971](https://github.com/grafana/loki/pull/5971) **kavirajk**: Record statistics about metadata queries such as labels and series queries in `metrics.go` as well
