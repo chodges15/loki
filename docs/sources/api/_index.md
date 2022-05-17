@@ -47,6 +47,7 @@ These endpoints are exposed by the ingester:
 
 - [`POST /flush`](#post-flush)
 - [`POST /ingester/flush_shutdown`](#post-ingesterflush_shutdown)
+- [`POST /ingester/shutdown_and_forget`](#post-ingestershutdown_and_forget)
 
 The API endpoints starting with `/loki/` are [Prometheus API-compatible](https://prometheus.io/docs/prometheus/latest/querying/api/) and the result formats can be used interchangeably.
 
@@ -810,6 +811,14 @@ This is helpful for scaling down WAL-enabled ingesters where we want to ensure o
 but instead flushed to our chunk backend.
 
 In microservices mode, the `/ingester/flush_shutdown` endpoint is exposed by the ingester.
+
+## `POST /ingester/shutdown_and_forget`
+
+`/ingester/shutdown_and_forget` is similar to the [`/ingester/flush_shutdown`](#post-ingesterflush_shutdown)
+endpoint, but additionally to flushing the chunks it will also delete the file that contains the ingester ring
+tokens of the instance, if the `-ingester.token-file-path` is specified, and will terminate the Loki process.
+
+In microservices mode, the `/ingester/shutdown_and_forget` endpoint is exposed by the ingester.
 
 ### `GET /distributor/ring`
 
