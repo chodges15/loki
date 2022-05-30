@@ -174,8 +174,9 @@ type Interface interface {
 	CheckReady(ctx context.Context) error
 	FlushHandler(w http.ResponseWriter, _ *http.Request)
 	ShutdownHandler(w http.ResponseWriter, r *http.Request)
-	ShutdownAndForgetHandler(w http.ResponseWriter, r *http.Request)
 	GetOrCreateInstance(instanceID string) *instance
+	// deprecated
+	LegacyShutdownHandler(w http.ResponseWriter, r *http.Request)
 }
 
 // Ingester builds chunks for incoming log streams.
@@ -534,10 +535,16 @@ func (i *Ingester) loop() {
 	}
 }
 
-// ShutdownHandler triggers the following set of operations in order:
+// LegacyShutdownHandler triggers the following set of operations in order:
 //     * Change the state of ring to stop accepting writes.
 //     * Flush all the chunks.
-func (i *Ingester) ShutdownHandler(w http.ResponseWriter, r *http.Request) {
+// Note: This handler does not trigger a termination of the Loki process,
+// despite its name. Instead, the ingester service is stopped, so an external
+// source can trigger a safe termination through a signal to the process.
+// The handler is deprecated and usage is discouraged. Use ShutdownHandler
+// instead.
+func (i *Ingester) LegacyShutdownHandler(w http.ResponseWriter, r *http.Request) {
+	level.Warn(util_log.Logger).Log("msg", "This handler is deprecated and usage is discouraged. Please use /ingester/shutdown?flush=true instead.")
 	originalState := i.lifecycler.FlushOnShutdown()
 	// We want to flush the chunks if transfer fails irrespective of original flag.
 	i.lifecycler.SetFlushOnShutdown(true)
@@ -546,15 +553,25 @@ func (i *Ingester) ShutdownHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ShutdownAndForgetHandler triggers the following operations:
+// ShutdownHandler handles a graceful shutdown of the ingester service and
+// termination of the Loki process.
+func (i *Ingester) ShutdownHandler(w http.ResponseWriter, r *http.Request) {
+	params := r.URL.Query()
+	doFlush := util.FlagFromValues(params, "flush", true)
+	doDeleteRingTokens := util.FlagFromValues(params, "delete_ring_tokens", false)
+	i.handleShutdown(w, doFlush, doDeleteRingTokens)
+}
+
+// handleShutdown triggers the following operations:
 //     * Change the state of ring to stop accepting writes.
-//     * Flush all the chunks.
+//     * optional: Flush all the chunks.
+//     * optional: Delete ring tokens file
 //     * Unregister from KV store
-//     * Terminate process
-func (i *Ingester) ShutdownAndForgetHandler(w http.ResponseWriter, r *http.Request) {
-	i.lifecycler.SetFlushOnShutdown(true)
+//     * Terminate process (handled by service manager in loki.go)
+func (i *Ingester) handleShutdown(w http.ResponseWriter, flush, del bool) {
+	i.lifecycler.SetFlushOnShutdown(flush)
+	i.lifecycler.SetClearTokensOnShutdown(del)
 	i.lifecycler.SetUnregisterOnShutdown(true)
-	i.lifecycler.SetClearTokensOnShutdown(true)
 	err := services.StopAndAwaitTerminated(context.Background(), i)
 	// Stopping the module will return the modules.ErrStopProcess error. This is
 	// needed so the Loki process is shut down completely.

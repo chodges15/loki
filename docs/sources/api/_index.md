@@ -46,8 +46,8 @@ These endpoints are exposed by the distributor:
 These endpoints are exposed by the ingester:
 
 - [`POST /flush`](#post-flush)
-- [`POST /ingester/flush_shutdown`](#post-ingesterflush_shutdown)
-- [`POST /ingester/shutdown_and_forget`](#post-ingestershutdown_and_forget)
+- **Deprecated** [`POST /ingester/flush_shutdown`](#post-ingesterflush_shutdown)
+- [`POST /ingester/shutdown`](#post-ingestershutdown)
 
 The API endpoints starting with `/loki/` are [Prometheus API-compatible](https://prometheus.io/docs/prometheus/latest/querying/api/) and the result formats can be used interchangeably.
 
@@ -806,21 +806,31 @@ In microservices mode, the `/flush` endpoint is exposed by the ingester.
 
 ## `POST /ingester/flush_shutdown`
 
+**Deprecated**: Please use `/ingester/shutdown?flush=true` instead.
+
 `/ingester/flush_shutdown` triggers a shutdown of the ingester and notably will _always_ flush any in memory chunks it holds.
 This is helpful for scaling down WAL-enabled ingesters where we want to ensure old WAL directories are not orphaned,
 but instead flushed to our chunk backend.
 
 In microservices mode, the `/ingester/flush_shutdown` endpoint is exposed by the ingester.
 
-## `POST /ingester/shutdown_and_forget`
+## `POST /ingester/shutdown`
 
-`/ingester/shutdown_and_forget` is similar to the [`/ingester/flush_shutdown`](#post-ingesterflush_shutdown)
-endpoint, but additionally to flushing the chunks it will also delete the file that contains the ingester ring
-tokens of the instance, if the `-ingester.token-file-path` is specified, and will terminate the Loki process.
+`/ingester/shutdown` is similar to the [`/ingester/flush_shutdown`](#post-ingesterflush_shutdown)
+endpoint, but accepts two URL query parameters `flush` and `delete_ring_tokens`.
 
-In microservices mode, the `/ingester/shutdown_and_forget` endpoint is exposed by the ingester.
+**URL query parameters:**
 
-### `GET /distributor/ring`
+* `flush=<bool>`:
+  Flag to control whether to flush any in-memory chunks the ingester holds. Defaults to `true`.
+* `delete_ring_tokens=<bool>`:
+  Flag to control whether to delete the file that contains the ingester ring tokens of the instance if the `-ingester.token-file-path` is specified.
+
+This handler, in contrast to the `/ingester/flush_shutdown` handler, terminates the Loki process.
+
+In microservices mode, the `/ingester/shutdown` endpoint is exposed by the ingester.
+
+## `GET /distributor/ring`
 
 Displays a web page with the distributor hash ring status, including the state, healthy and last heartbeat time of each distributor.
 

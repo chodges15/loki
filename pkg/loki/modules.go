@@ -345,12 +345,11 @@ func (t *Loki) initIngester() (_ services.Service, err error) {
 		httpMiddleware.Wrap(http.HandlerFunc(t.Ingester.FlushHandler)),
 	)
 	t.Server.HTTP.Methods("POST").Path("/ingester/flush_shutdown").Handler(
+		httpMiddleware.Wrap(http.HandlerFunc(t.Ingester.LegacyShutdownHandler)),
+	)
+	t.Server.HTTP.Methods("POST").Path("/ingester/shutdown").Handler(
 		httpMiddleware.Wrap(http.HandlerFunc(t.Ingester.ShutdownHandler)),
 	)
-	t.Server.HTTP.Methods("POST").Path("/ingester/shutdown_and_forget").Handler(
-		httpMiddleware.Wrap(http.HandlerFunc(t.Ingester.ShutdownAndForgetHandler)),
-	)
-
 	return t.Ingester, nil
 }
 
