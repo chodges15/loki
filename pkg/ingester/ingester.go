@@ -559,20 +559,8 @@ func (i *Ingester) ShutdownHandler(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()
 	doFlush := util.FlagFromValues(params, "flush", true)
 	doDeleteRingTokens := util.FlagFromValues(params, "delete_ring_tokens", false)
-	i.handleShutdown(w, doFlush, doDeleteRingTokens)
-}
+	err := i.handleShutdown(doFlush, doDeleteRingTokens)
 
-// handleShutdown triggers the following operations:
-//     * Change the state of ring to stop accepting writes.
-//     * optional: Flush all the chunks.
-//     * optional: Delete ring tokens file
-//     * Unregister from KV store
-//     * Terminate process (handled by service manager in loki.go)
-func (i *Ingester) handleShutdown(w http.ResponseWriter, flush, del bool) {
-	i.lifecycler.SetFlushOnShutdown(flush)
-	i.lifecycler.SetClearTokensOnShutdown(del)
-	i.lifecycler.SetUnregisterOnShutdown(true)
-	err := services.StopAndAwaitTerminated(context.Background(), i)
 	// Stopping the module will return the modules.ErrStopProcess error. This is
 	// needed so the Loki process is shut down completely.
 	if err == nil || err == modules.ErrStopProcess {
@@ -581,6 +569,19 @@ func (i *Ingester) handleShutdown(w http.ResponseWriter, flush, del bool) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
 	}
+}
+
+// handleShutdown triggers the following operations:
+//     * Change the state of ring to stop accepting writes.
+//     * optional: Flush all the chunks.
+//     * optional: Delete ring tokens file
+//     * Unregister from KV store
+//     * Terminate process (handled by service manager in loki.go)
+func (i *Ingester) handleShutdown(flush, del bool) error {
+	i.lifecycler.SetFlushOnShutdown(flush)
+	i.lifecycler.SetClearTokensOnShutdown(del)
+	i.lifecycler.SetUnregisterOnShutdown(true)
+	return services.StopAndAwaitTerminated(context.Background(), i)
 }
 
 // Push implements logproto.Pusher.
