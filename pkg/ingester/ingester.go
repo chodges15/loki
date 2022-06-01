@@ -544,7 +544,7 @@ func (i *Ingester) loop() {
 // The handler is deprecated and usage is discouraged. Use ShutdownHandler
 // instead.
 func (i *Ingester) LegacyShutdownHandler(w http.ResponseWriter, r *http.Request) {
-	level.Warn(util_log.Logger).Log("msg", "This handler is deprecated and usage is discouraged. Please use /ingester/shutdown?flush=true instead.")
+	level.Warn(util_log.Logger).Log("msg", "The handler /ingester/flush_shutdown is deprecated and usage is discouraged. Please use /ingester/shutdown?flush=true instead.")
 	originalState := i.lifecycler.FlushOnShutdown()
 	// We want to flush the chunks if transfer fails irrespective of original flag.
 	i.lifecycler.SetFlushOnShutdown(true)
