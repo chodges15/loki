@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
+	"go.uber.org/atomic"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/grafana/loki/pkg/chunkenc"
@@ -212,6 +213,10 @@ type Ingester struct {
 	// Denotes whether the ingester should flush on shutdown.
 	// Currently only used by the WAL to signal when the disk is full.
 	flushOnShutdownSwitch *OnceSwitch
+	// Flag for whether stopping the ingester service should also terminate the
+	// loki process.
+	// This is set when calling the shutdown handler.
+	terminateOnShutdown bool
 
 	// Only used by WAL & flusher to coordinate backpressure during replay.
 	replayController *replayController
@@ -248,6 +253,7 @@ func New(cfg Config, clientConfig client.Config, store ChunkStore, limits *valid
 		tailersQuit:           make(chan struct{}),
 		metrics:               metrics,
 		flushOnShutdownSwitch: &OnceSwitch{},
+		terminateOnShutdown:   false,
 	}
 	i.replayController = newReplayController(metrics, cfg.WAL, &replayFlusher{i})
 
@@ -509,10 +515,10 @@ func (i *Ingester) stopping(_ error) error {
 	}
 	i.flushQueuesDone.Wait()
 
-	// In case the flag to clear tokens on shutdown is set we need to mark the
+	// In case the flag to terminate on shutdown is set we need to mark the
 	// ingester service as "failed", so Loki will shut down entirely.
 	// The module manager logs the failure `modules.ErrStopProcess` in a special way.
-	if i.lifecycler.ClearTokensOnShutdown() && errs.Err() == nil {
+	if i.terminateOnShutdown && errs.Err() == nil {
 		return modules.ErrStopProcess
 	}
 	return errs.Err()
@@ -556,10 +562,16 @@ func (i *Ingester) LegacyShutdownHandler(w http.ResponseWriter, r *http.Request)
 // ShutdownHandler handles a graceful shutdown of the ingester service and
 // termination of the Loki process.
 func (i *Ingester) ShutdownHandler(w http.ResponseWriter, r *http.Request) {
+	// Don't allow calling the shutdown handler multiple times
+	if i.State() != services.Running {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("Ingester is stopping or already stopped."))
+	}
 	params := r.URL.Query()
 	doFlush := util.FlagFromValues(params, "flush", true)
 	doDeleteRingTokens := util.FlagFromValues(params, "delete_ring_tokens", false)
-	err := i.handleShutdown(doFlush, doDeleteRingTokens)
+	doTerminate := util.FlagFromValues(params, "terminate", true)
+	err := i.handleShutdown(doTerminate, doFlush, doDeleteRingTokens)
 
 	// Stopping the module will return the modules.ErrStopProcess error. This is
 	// needed so the Loki process is shut down completely.
@@ -576,11 +588,12 @@ func (i *Ingester) ShutdownHandler(w http.ResponseWriter, r *http.Request) {
 //     * optional: Flush all the chunks.
 //     * optional: Delete ring tokens file
 //     * Unregister from KV store
-//     * Terminate process (handled by service manager in loki.go)
-func (i *Ingester) handleShutdown(flush, del bool) error {
+//     * optional: Terminate process (handled by service manager in loki.go)
+func (i *Ingester) handleShutdown(terminate, flush, del bool) error {
 	i.lifecycler.SetFlushOnShutdown(flush)
 	i.lifecycler.SetClearTokensOnShutdown(del)
 	i.lifecycler.SetUnregisterOnShutdown(true)
+	i.terminateOnShutdown = terminate
 	return services.StopAndAwaitTerminated(context.Background(), i)
 }
 
