@@ -565,6 +565,7 @@ func (i *Ingester) ShutdownHandler(w http.ResponseWriter, r *http.Request) {
 	if i.State() != services.Running {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte("Ingester is stopping or already stopped."))
+		return
 	}
 	params := r.URL.Query()
 	doFlush := util.FlagFromValues(params, "flush", true)
