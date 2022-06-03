@@ -563,7 +563,7 @@ func (i *Ingester) LegacyShutdownHandler(w http.ResponseWriter, r *http.Request)
 func (i *Ingester) ShutdownHandler(w http.ResponseWriter, r *http.Request) {
 	// Don't allow calling the shutdown handler multiple times
 	if i.State() != services.Running {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("Ingester is stopping or already stopped."))
 		return
 	}
