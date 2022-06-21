@@ -43,6 +43,7 @@ func main() {
 	certFile := flag.String("cert-file", "", "Client PEM encoded X.509 certificate for optional use with TLS connection to Loki")
 	keyFile := flag.String("key-file", "", "Client PEM encoded X.509 key for optional use with TLS connection to Loki")
 	caFile := flag.String("ca-file", "", "Client certificate authority for optional use with TLS connection to Loki")
+	serverName := flag.String("server-name", "", "Server name for validating target certificate, allow any if empty")
 	user := flag.String("user", "", "Loki username.")
 	pass := flag.String("pass", "", "Loki password.")
 	tenantID := flag.String("tenant-id", "", "Tenant ID to be set in X-Scope-OrgID header.")
@@ -99,7 +100,12 @@ func main() {
 		tc.CAFile = *caFile
 		tc.CertFile = *certFile
 		tc.KeyFile = *keyFile
-		tc.InsecureSkipVerify = false
+		if len(*serverName) > 0 {
+			tc.ServerName = *serverName
+			tc.InsecureSkipVerify = false
+		} else {
+			tc.InsecureSkipVerify = true
+		}
 
 		var err error
 		tlsConfig, err = config.NewTLSConfig(&tc)
