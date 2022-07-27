@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	uploadIndexSetsConcurrency = 10
+	uploadIndexSetsConcurrency = 100
 	gzipExtension              = ".gz"
 )
 
