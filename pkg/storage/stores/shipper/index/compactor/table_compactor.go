@@ -182,10 +182,11 @@ func (t *tableCompactor) CompactTable(desiredDuration time.Duration) error {
 	}
 
 	for _, userCompactedIndexSet := range t.userCompactedIndexSet {
-		if !userCompactedIndexSet.needsUpload {
-			continue
-		}
-		if err := userCompactedIndexSet.SetCompactedIndex(userCompactedIndexSet.compactedIndex, nil, true); err != nil {
+		// Inform higher level abstraction of the index files
+		// that were fetched/parsed. The index set is going to
+		// call cleanup even if it doesn't upload the contents of
+		// the compacted index
+		if err := userCompactedIndexSet.SetCompactedIndex(userCompactedIndexSet.compactedIndex, nil, userCompactedIndexSet.needsUpload); err != nil {
 			return err
 		}
 	}
