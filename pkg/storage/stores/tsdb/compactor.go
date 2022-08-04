@@ -86,7 +86,7 @@ func newTableCompactor(
 	}
 }
 
-func (t *tableCompactor) CompactTable() error {
+func (t *tableCompactor) CompactTable(_ time.Duration) error {
 	multiTenantIndexes := t.commonIndexSet.ListSourceFiles()
 
 	var multiTenantIndices []Index
@@ -156,7 +156,7 @@ func (t *tableCompactor) CompactTable() error {
 		compactedIndex := newCompactedIndex(t.ctx, existingUserIndexSet.GetTableName(), userID, existingUserIndexSet.GetWorkingDir(), t.periodConfig, builder)
 		t.compactedIndexes[userID] = compactedIndex
 
-		if err := existingUserIndexSet.SetCompactedIndex(compactedIndex, true); err != nil {
+		if err := existingUserIndexSet.SetCompactedIndex(compactedIndex, nil, true); err != nil {
 			return err
 		}
 	}
@@ -175,13 +175,13 @@ func (t *tableCompactor) CompactTable() error {
 
 		compactedIndex := newCompactedIndex(t.ctx, srcIdxSet.GetTableName(), userID, srcIdxSet.GetWorkingDir(), t.periodConfig, builder)
 		t.compactedIndexes[userID] = compactedIndex
-		if err := srcIdxSet.SetCompactedIndex(compactedIndex, true); err != nil {
+		if err := srcIdxSet.SetCompactedIndex(compactedIndex, nil, true); err != nil {
 			return err
 		}
 	}
 
 	if len(multiTenantIndices) > 0 {
-		if err := t.commonIndexSet.SetCompactedIndex(nil, true); err != nil {
+		if err := t.commonIndexSet.SetCompactedIndex(nil, nil, true); err != nil {
 			return err
 		}
 	}

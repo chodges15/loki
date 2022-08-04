@@ -70,12 +70,14 @@ const (
 type compactedIndexSet struct {
 	compactor.IndexSet
 	compactedIndex *CompactedIndex
+	needsUpload    bool
 }
 
-func newCompactedIndexSet(indexSet compactor.IndexSet, compactedIndex *CompactedIndex) *compactedIndexSet {
+func newCompactedIndexSet(indexSet compactor.IndexSet, compactedIndex *CompactedIndex, needsUpload bool) *compactedIndexSet {
 	return &compactedIndexSet{
 		IndexSet:       indexSet,
 		compactedIndex: compactedIndex,
+		needsUpload:    needsUpload,
 	}
 }
 
@@ -88,6 +90,8 @@ type tableCompactor struct {
 
 	userCompactedIndexSet    map[string]*compactedIndexSet
 	userCompactedIndexSetMtx sync.RWMutex
+
+	metrics *metrics
 }
 
 func newTableCompactor(
@@ -96,6 +100,7 @@ func newTableCompactor(
 	existingUserIndexSet map[string]compactor.IndexSet,
 	userIndexSetFactoryFunc compactor.MakeEmptyUserIndexSetFunc,
 	periodConfig config.PeriodConfig,
+	metrics *metrics,
 ) *tableCompactor {
 	return &tableCompactor{
 		ctx:                     ctx,
@@ -104,17 +109,29 @@ func newTableCompactor(
 		userIndexSetFactoryFunc: userIndexSetFactoryFunc,
 		userCompactedIndexSet:   map[string]*compactedIndexSet{},
 		periodConfig:            periodConfig,
+		metrics:                 metrics,
 	}
 }
 
-func (t *tableCompactor) CompactTable() error {
+func (t *tableCompactor) CompactTable(desiredDuration time.Duration) error {
 	commonIndexes := t.commonIndexSet.ListSourceFiles()
+	// prefetch existing user compacted index files to avoid serializing batches of records being re-written
+	err := t.prefetchUserIndexFiles()
+	if err != nil {
+		return err
+	}
 
 	// we need to perform compaction if we have more than 1 files in the storage or the only file we have is not a compaction file.
 	// if the files are already compacted we need to see if we need to recreate the compacted DB to reduce its space.
 	if len(commonIndexes) > 1 || (len(commonIndexes) == 1 && !strings.HasPrefix(commonIndexes[0].Name, uploaderName)) || mustRecreateCompactedDB(commonIndexes) {
 		var err error
-		commonIndex, err := compactIndexes(t.ctx, t.periodConfig, t.commonIndexSet, func(userID string) (*CompactedIndex, error) {
+		compactCtx := t.ctx
+		if desiredDuration != 0*time.Second {
+			ctx, cancel := context.WithTimeout(compactCtx, desiredDuration)
+			compactCtx = ctx
+			defer cancel()
+		}
+		commonIndex, consumedFiles, err := compactIndexes(compactCtx, t.metrics, t.periodConfig, t.commonIndexSet, func(userID string) (*CompactedIndex, error) {
 			userCompactedIndexSet, err := t.getOrCreateUserCompactedIndexSet(userID)
 			if err != nil {
 				return nil, err
@@ -145,38 +162,31 @@ func (t *tableCompactor) CompactTable() error {
 			commonCompactedIndex = commonIndex
 		}
 
-		if err := t.commonIndexSet.SetCompactedIndex(commonCompactedIndex, true); err != nil {
+		if err := t.commonIndexSet.SetCompactedIndex(commonCompactedIndex, consumedFiles, true); err != nil {
 			return err
 		}
 	}
 
-	for userID, indexSet := range t.existingUserIndexSet {
-		if _, ok := t.userCompactedIndexSet[userID]; ok {
-			continue
-		}
-
+	for _, userCompactedIndexSet := range t.userCompactedIndexSet {
+		indexSet := userCompactedIndexSet.IndexSet
 		// We did not have any updates for this indexSet during compaction.
 		// Now see if it has more than one files to compact it down to a single file or if it requires recreation to save space.
 		sourceFiles := indexSet.ListSourceFiles()
-		if len(sourceFiles) > 1 || mustRecreateCompactedDB(sourceFiles) {
-			userCompactedIndexSet, err := t.getOrCreateUserCompactedIndexSet(userID)
-			if err != nil {
+		if mustRecreateCompactedDB(sourceFiles) {
+			if err := userCompactedIndexSet.compactedIndex.recreateCompactedDB(); err != nil {
 				return err
-			}
-			if len(sourceFiles) == 1 {
-				if err := userCompactedIndexSet.compactedIndex.recreateCompactedDB(); err != nil {
-					return err
-				}
 			}
 
-			if err := userCompactedIndexSet.SetCompactedIndex(userCompactedIndexSet.compactedIndex, true); err != nil {
-				return err
-			}
+			userCompactedIndexSet.needsUpload = true
 		}
 	}
 
 	for _, userCompactedIndexSet := range t.userCompactedIndexSet {
-		if err := userCompactedIndexSet.SetCompactedIndex(userCompactedIndexSet.compactedIndex, true); err != nil {
+		// Inform higher level abstraction of the index files
+		// that were fetched/parsed. The index set is going to
+		// call cleanup even if it doesn't upload the contents of
+		// the compacted index
+		if err := userCompactedIndexSet.SetCompactedIndex(userCompactedIndexSet.compactedIndex, nil, userCompactedIndexSet.needsUpload); err != nil {
 			return err
 		}
 	}
@@ -184,11 +194,71 @@ func (t *tableCompactor) CompactTable() error {
 	return nil
 }
 
+func (t *tableCompactor) prefetchUserIndexFiles() error {
+	existingUsers := make([]string, 0, len(t.existingUserIndexSet))
+	for userId, _ := range t.existingUserIndexSet {
+		existingUsers = append(existingUsers, userId)
+	}
+
+	return concurrency.ForEachJob(t.ctx, len(existingUsers), readDBsConcurrency, func(ctx context.Context, idx int) error {
+		userID := existingUsers[idx]
+		compactedIndex, err := t.fetchUserCompactedIndexSet(userID)
+		if err != nil {
+			return err
+		}
+
+		t.userCompactedIndexSetMtx.Lock()
+		defer t.userCompactedIndexSetMtx.Unlock()
+
+		t.userCompactedIndexSet[userID] = compactedIndex
+		return nil
+
+	})
+}
+
+func (t *tableCompactor) fetchUserCompactedIndexSet(userID string) (*compactedIndexSet, error) {
+	userIndexSet, ok := t.existingUserIndexSet[userID]
+	if !ok {
+		return nil, errors.New("requested non-existing compacted tenant index")
+	}
+
+	sourceFiles := userIndexSet.ListSourceFiles()
+	if len(sourceFiles) > 1 {
+		compactedIndex, _, err := compactIndexes(t.ctx, t.metrics, t.periodConfig, userIndexSet, func(userID string) (*CompactedIndex, error) {
+			return nil, errors.New("compacted user index set should not be requested while compacting user index")
+		})
+		if err != nil {
+			return nil, err
+		}
+		return newCompactedIndexSet(userIndexSet, compactedIndex, true), nil
+	} else if len(sourceFiles) == 1 {
+		indexFile, err := userIndexSet.GetSourceFile(sourceFiles[0])
+		if err != nil {
+			return nil, err
+		}
+		boltdb, err := openBoltdbFileWithNoSync(indexFile)
+		if err != nil {
+			return nil, err
+		}
+
+		return newCompactedIndexSet(userIndexSet, newCompactedIndex(boltdb, userIndexSet.GetTableName(), userIndexSet.GetWorkingDir(), t.periodConfig, userIndexSet.GetLogger()), false), nil
+	}
+	return nil, errors.New("attempted to fetch empty index set")
+
+}
+
 func (t *tableCompactor) getOrCreateUserCompactedIndexSet(userID string) (*compactedIndexSet, error) {
 	t.userCompactedIndexSetMtx.RLock()
 	indexSet, ok := t.userCompactedIndexSet[userID]
+	needsUpload := ok && indexSet.needsUpload
 	t.userCompactedIndexSetMtx.RUnlock()
 	if ok {
+		if !needsUpload {
+			t.userCompactedIndexSetMtx.Lock()
+			defer t.userCompactedIndexSetMtx.Unlock()
+			indexSet.needsUpload = true
+
+		}
 		return indexSet, nil
 	}
 
@@ -213,45 +283,54 @@ func (t *tableCompactor) getOrCreateUserCompactedIndexSet(userID string) (*compa
 			return nil, err
 		}
 		compactedIndex := newCompactedIndex(compactedFile, userIndexSet.GetTableName(), userIndexSet.GetWorkingDir(), t.periodConfig, userIndexSet.GetLogger())
-		t.userCompactedIndexSet[userID] = newCompactedIndexSet(userIndexSet, compactedIndex)
+		t.userCompactedIndexSet[userID] = newCompactedIndexSet(userIndexSet, compactedIndex, true)
 	} else {
-		compactedIndex, err := compactIndexes(t.ctx, t.periodConfig, userIndexSet, func(userID string) (*CompactedIndex, error) {
-			return nil, errors.New("compacted user index set should not be requested while compacting user index")
-		})
+		compactedIndex, err := t.fetchUserCompactedIndexSet(userID)
 		if err != nil {
 			return nil, err
 		}
-		t.userCompactedIndexSet[userID] = newCompactedIndexSet(userIndexSet, compactedIndex)
+		t.userCompactedIndexSet[userID] = compactedIndex
 	}
 
 	return t.userCompactedIndexSet[userID], nil
 }
 
-func compactIndexes(ctx context.Context, periodConfig config.PeriodConfig, idxSet compactor.IndexSet,
-	getCompactedUserIndex func(userID string) (*CompactedIndex, error)) (*CompactedIndex, error) {
+func compactIndexes(ctx context.Context, metrics *metrics, periodConfig config.PeriodConfig, idxSet compactor.IndexSet,
+	getCompactedUserIndex func(userID string) (*CompactedIndex, error)) (*CompactedIndex, []storage.IndexFile, error) {
 	indexes := idxSet.ListSourceFiles()
 	compactedFileIdx := compactedFileIdx(indexes)
 	workingDir := idxSet.GetWorkingDir()
 	compactedDBName := filepath.Join(workingDir, fmt.Sprint(time.Now().Unix()))
 
+	var consumedIndexesMtx sync.Mutex
+	consumedIndexes := make([]storage.IndexFile, 0, len(indexes))
+
 	// if we find a previously compacted file, use it as a seed file to copy other index into it
 	if compactedFileIdx != -1 {
 		level.Info(idxSet.GetLogger()).Log("msg", fmt.Sprintf("using %s as seed file", indexes[compactedFileIdx].Name))
+		consumedIndexes = append(consumedIndexes, indexes[compactedFileIdx])
 
 		var err error
 		compactedDBName, err = idxSet.GetSourceFile(indexes[compactedFileIdx])
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	compactedFile, err := openBoltdbFileWithNoSync(compactedDBName)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// go through each file and build index in FORMAT1 from FORMAT1 indexes and FORMAT3 from FORMAT2 indexes
 	err = concurrency.ForEachJob(ctx, len(indexes), readDBsConcurrency, func(ctx context.Context, idx int) error {
+		// respect the provided timeout:
+		// Index files that were not ingested by the timeout
+		// will not be removed from storage. Subsequent
+		// compaction runs should pick them up
+		if deadline, ok := ctx.Deadline(); ok && time.Now().After(deadline) {
+			return nil
+		}
 		workNum := idx
 		// skip seed file
 		if workNum == compactedFileIdx {
@@ -262,7 +341,7 @@ func compactIndexes(ctx context.Context, periodConfig config.PeriodConfig, idxSe
 			return err
 		}
 
-		return readFile(idxSet.GetLogger(), downloadAt, func(bucketName string, batch []indexEntry) error {
+		err = readFile(idxSet.GetLogger(), metrics, downloadAt, func(bucketName string, batch []indexEntry) error {
 			indexFile := compactedFile
 			if bucketName != shipper_util.GetUnsafeString(local.IndexBucketName) {
 				userIndex, err := getCompactedUserIndex(bucketName)
@@ -275,12 +354,29 @@ func compactIndexes(ctx context.Context, periodConfig config.PeriodConfig, idxSe
 
 			return writeBatch(indexFile, batch)
 		})
+		if err != nil {
+			return err
+		}
+
+		consumedIndexesMtx.Lock()
+		defer consumedIndexesMtx.Unlock()
+		consumedIndexes = append(consumedIndexes, indexes[idx])
+
+		if metrics != nil {
+			metrics.compactTablesFilesIngested.Add(1)
+		}
+
+		return nil
 	})
-	if err != nil {
-		return nil, err
+	// if we encounter an error but some indexes were succesfully consumed, attempt to checkpoint results
+	if err != nil && len(consumedIndexes) == 0 {
+		return nil, nil, err
+	}
+	if err != nil && len(consumedIndexes) > 0 {
+		level.Warn(idxSet.GetLogger()).Log("msg", "unable to fully consume all index files. some files were consumed. attempting checkpointing", "err", err)
 	}
 
-	return newCompactedIndex(compactedFile, idxSet.GetTableName(), workingDir, periodConfig, idxSet.GetLogger()), nil
+	return newCompactedIndex(compactedFile, idxSet.GetTableName(), workingDir, periodConfig, idxSet.GetLogger()), consumedIndexes, nil
 }
 
 // compactedFileIdx returns index of previously compacted file(which starts with uploaderName).
@@ -310,7 +406,13 @@ func openBoltdbFileWithNoSync(path string) (*bbolt.DB, error) {
 }
 
 // readFile reads an index file and sends batch of index to writeBatch func.
-func readFile(logger log.Logger, path string, writeBatch func(userID string, batch []indexEntry) error) error {
+func readFile(logger log.Logger, metrics *metrics, path string, writeBatch func(userID string, batch []indexEntry) error) error {
+	startTime := time.Now()
+	defer func() {
+		if metrics != nil {
+			metrics.compactTablesFileIngestLatencyMs.Observe(float64(time.Now().Sub(startTime).Milliseconds()))
+		}
+	}()
 	level.Debug(logger).Log("msg", "reading file for compaction", "path", path)
 
 	db, err := util.SafeOpenBoltdbFile(path)

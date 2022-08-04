@@ -23,6 +23,7 @@ import (
 	"github.com/grafana/loki/pkg/storage/config"
 	"github.com/grafana/loki/pkg/storage/stores/indexshipper/compactor/retention"
 	"github.com/grafana/loki/pkg/storage/stores/indexshipper/index"
+	"github.com/grafana/loki/pkg/storage/stores/indexshipper/storage"
 	"github.com/grafana/loki/pkg/storage/stores/shipper/testutil"
 )
 
@@ -200,6 +201,10 @@ func (c compactedIndex) Reader() (io.ReadSeeker, error) {
 	return c.indexFile, nil
 }
 
+func (c compactedIndex) SourceFiles() []storage.IndexFile {
+	return nil
+}
+
 type testIndexCompactor struct{}
 
 func newTestIndexCompactor() testIndexCompactor {
@@ -228,7 +233,7 @@ func newTestTableCompactor(ctx context.Context, commonIndexSet IndexSet, existin
 	}
 }
 
-func (t tableCompactor) CompactTable() error {
+func (t tableCompactor) CompactTable(_ time.Duration) error {
 	sourceFiles := t.commonIndexSet.ListSourceFiles()
 	perUserIndexes := map[string]CompactedIndex{}
 
@@ -311,7 +316,7 @@ func (t tableCompactor) CompactTable() error {
 			}
 		}
 
-		if err := t.commonIndexSet.SetCompactedIndex(commonCompactedIndex, true); err != nil {
+		if err := t.commonIndexSet.SetCompactedIndex(commonCompactedIndex, nil, true); err != nil {
 			return err
 		}
 	}
@@ -335,7 +340,7 @@ func (t tableCompactor) CompactTable() error {
 	}
 
 	for userID, userIndex := range perUserIndexes {
-		if err := t.existingUserIndexSet[userID].SetCompactedIndex(userIndex, true); err != nil {
+		if err := t.existingUserIndexSet[userID].SetCompactedIndex(userIndex, nil, true); err != nil {
 			return err
 		}
 	}
